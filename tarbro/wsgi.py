@@ -123,6 +123,10 @@ def get_tar_list(environ, tfile, start_response, path=""):
 
     html_lines.extend(folders)
     html_lines.extend(files)
+    html_lines.extend(HTML_FILE.format('Download this whole tar.gz file',
+                                       mtime=somehow_get_mtime_of_tfile(),
+                                       size=somehow_get_size_of_tfile(),
+                                       href="{}{}{}".format(request_uri, '?', 'TARBRO_DOWNLOAD')))
     html_lines.extend(HTML_POST)
 
     status = "200 OK"
@@ -202,6 +206,9 @@ def application(environ, start_response):
     # absolut path of tarfile on file system (depends on DOCUMENT_ROOT)
     tar_path = environ["PATH_TRANSLATED"]
 
+    if query_string = 'TARBRO_DOWNLOAD':
+        return  # or some other way how to send the file as whole
+    
     ftype = get_path_type(tar_path, query_string)
 
     # we're  not  processing links, so, just list the directory link in
