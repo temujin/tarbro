@@ -1,3 +1,4 @@
+import datetime
 import exceptions
 import json
 import os
@@ -19,6 +20,9 @@ HTML_PRE = """
 <html>
 <head>
 <title>Index of {path}</title>
+<style type="text/css">
+table td img {{ vertical-align: middle; }}
+</style>
 </head>
 <body>
 <h1>Index of {path}</h1>
@@ -33,6 +37,8 @@ HTML_PRE = """
 HTML_FOLDER = "<tr><td><img src=\"/icons/folder.gif\" alt=\"[DIR]\"> <a href=\"{href}\">{name}/</a></td> <td style=\"padding: 0 50px 0 50px\">{mtime}</td> <td>-</td></tr>"
 HTML_FILE = "<tr><td><img src=\"/icons/generic.gif\" alt=\"[FILE]\"> <a href=\"{href}\">{name}</a></td> <td style=\"padding: 0 50px 0 50px\">{mtime}</td> <td>{size}</td></tr>"
 HTML_LINK = "<tr><td><img src=\"/icons/link.gif\" alt=\"[SYMLINK]\">{name} -> {linkpath}</td> <td>{mtime}</td> <td style=\"padding: 0 50px 0 50px\">-</td></tr>"
+
+HTML_DOWNFILE = "<tr><td colspan=\"3\"><hr></td></tr>" + HTML_FILE
 
 HTML_POST = """
 </table>
@@ -202,6 +208,13 @@ def get_tar_list(environ, redis_cli, start_response, tfo=None):
 
     html_lines.extend(folders)
     html_lines.extend(files)
+
+    html_lines.extend(HTML_DOWNFILE.format(
+        name=('&darr; Download full <em>%s</em>'
+              % os.path.basename(tfo.name)),
+        mtime=datetime.datetime.fromtimestamp(os.path.getmtime(tfo.name)),
+        size=os.path.getsize(tfo.name),
+        href="/-tarbro-raw-{}".format(request_uri)))
     html_lines.extend(HTML_POST)
 
     status = "200 OK"
