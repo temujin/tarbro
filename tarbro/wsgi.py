@@ -11,8 +11,7 @@ import redis
 
 sys.path.append(os.path.join(os.path.split(__file__)[0]))
 
-from SETTINGS import *
-
+from SETTINGS import REDIS_CONN_ARGS, CACHE_TTL
 
 
 HTML_PRE = """
@@ -279,15 +278,21 @@ def application(environ, start_response):
 
     req_path = environ["PATH_INFO"]
     redis_cli = redis.StrictRedis(**REDIS_CONN_ARGS)
-    if not redis_cli.keys("{}*".format(req_path)):
-        start_build_cache(environ)
 
-    tfo = tarfile.open(tar_path, "r")
     try:
+        tfo = tarfile.open(tar_path, "r")
+        if not redis_cli.keys("{}*".format(req_path)):
+            start_build_cache(environ)
         ftype = get_path_type(environ, redis_cli, tfo)
-    except exceptions.KeyError as e:
+    except exceptions.KeyError:
+        sys.stderr.write("Here!\n")
         start_response("404 Not found", [])
-        return str(e)
+        return "Path {} is not in {}.".format(req_path,
+                                              os.path.split(tar_path)[-1])
+    except exceptions.IOError:
+        sys.stderr.write("And here!\n")
+        start_response("404 Not found", [])
+        return "{} not found.".format(os.path.split(tar_path)[-1])
 
     # we're  not  processing links, so, just list the directory link in
     if ftype == "l":
