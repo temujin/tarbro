@@ -76,3 +76,4 @@ and update next lines with actual data:
     *   ``<VirtualHost *:80>``
 
 Update SETTINGS.py if you need
+It contains redis connection setting and cahce ttl
