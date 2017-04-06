@@ -1,9 +1,19 @@
 import exceptions
+import json
+import os
+from multiprocessing import Process
+import sys
 import tarfile
 import time
 
 import humanfriendly as hf
-import os
+import redis
+
+sys.path.append(os.path.join(os.path.split(__file__)[0]))
+
+from SETTINGS import *
+
+
 
 HTML_PRE = """
 <!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 3.2 Final//EN\">
@@ -32,71 +42,141 @@ HTML_POST = """
 """
 
 
-def get_tar_list(environ, tfile, start_response, path=""):
+def ttype(tobj):
+    """Represent fs element type
+    One of directory, file or link
+    :param tobj: result of tarfile.getmember()
+    :return: filesystem element one char representation
+    """
+
+    if tobj.isdir():
+        return "d"
+    elif tobj.isreg():
+        return "f"
+    elif tobj.issym():
+        return "l"
+
+
+def build_cache_worker(environ, in_tar_path=None, tfo=None):
+    """Gether and cache tar filesystem object(s) data
+
+    :param environ: http request environ object
+    :param in_tar_path: internal tar path of fs element to process.
+                        If is None - all elements of tar  processed
+    :param tfo: open tarfile object.
+                If is None - new one will be created
+    """
+    req_path = environ["PATH_INFO"]
+    redis_cli = redis.StrictRedis()
+    tfile = environ["PATH_TRANSLATED"]
+
+    tf = tfo if tfo is not None else tarfile.open(tfile)
+
+    fullist = tf.getnames()
+    for_members = [in_tar_path] if in_tar_path is not None else fullist
+
+    for name in for_members:
+        if name:
+            tarobj = tf.getmember(name)
+            ftype = ttype(tarobj)
+        else:
+            # assume it's a root of tar
+            ftype = "d"
+
+        meta = {}
+
+        meta["type"] = ftype
+        if ftype == "d":
+            meta["content"] = {}
+            for path in fullist:
+                if not path.startswith(name):
+                    continue
+                cutpath = path.replace(name, "")
+                spath = cutpath.split(os.path.sep)
+                if not spath[0]:
+                    spath.pop(0)
+                if len(spath) != 1 or not spath[0]:
+                    continue
+                dto = tf.getmember(path)
+
+                meta["content"][spath[0]] = {
+                    "type": ttype(dto),
+                    "mtime": time.strftime(
+                        "%Y-%m-%d %H:%M",
+                        time.gmtime(dto.mtime)),
+                    "size": hf.format_size(dto.size)
+                }
+
+        json_meta = json.dumps(meta)
+        redis_cli.setex("{}?{}".format(req_path, name), CACHE_TTL, json_meta)
+
+    if tfo is None:
+        tf.close()
+
+
+def start_build_cache(environ):
+    """Run build_cache_worker in separate process
+    Non blocking way to build cache for the whole tar
+
+    :param environ: http reques environ object
+    """
+    p = Process(target=build_cache_worker, args=(environ,))
+    p.daemon = True
+    p.start()
+
+
+def get_cached(environ, redis_cli, in_tar_path=None, tfo=None):
+    """Lazy cache
+
+    :param environ: http reques environ object
+    :param redis_cli: instantiated redis client
+    :param in_tar_path: internal tar path of fs object to get
+                        if is None "PATH_INFO" from environ will be used
+    :param tfo: open tarfile object
+    :return: cdict
+    """
+    cached_info = redis_cli.get("{}?{}".format(
+        environ["PATH_INFO"], in_tar_path or environ["QUERY_STRING"]))
+
+    if cached_info is None:
+        build_cache_worker(environ, in_tar_path=in_tar_path, tfo=tfo)
+        cached_info = redis_cli.get("{}?{}".format(
+            environ["PATH_INFO"], in_tar_path or environ["QUERY_STRING"]))
+
+    return json.loads(cached_info)
+
+
+def get_tar_list(environ, redis_cli, start_response, tfo=None):
     """List directory in tar
+    Produses HTML, representing directory list.
 
     :param environ: environmennt, provided by http server (Apache2)
-    :param tfile: path to tarfile on file system
-    :param path: path in tarfile
+    :param redis_cli: instantiated redis client
+    :param star_response: callback, provided by 'mod_wsgi'
+    :param tfo: open tarfile object
     """
-    with tarfile.open(tfile) as tf:
-        fulllist = tf.getnames()
 
-        # part of request after port number
-        request_uri = environ["REQUEST_URI"]
+    in_tar_path = environ["QUERY_STRING"]
+    redis_key = environ["REQUEST_URI"]
 
-        # generate parent path for related link
-        srequri = request_uri.split("?")
-        if len(srequri) > 1 and srequri[1]:
-            parent_dir = "?".join([srequri[0], os.path.split(srequri[1])[0]])
-        else:
-            parent_dir = os.path.split(srequri[0])[0]
-        if parent_dir.endswith("?"):
-            parent_dir = parent_dir[:-1]
+    res = get_cached(environ, redis_cli, in_tar_path, tfo)["content"]
 
-        res = {}
+    # part of request after port number
+    request_uri = redis_key
 
-        for line in fulllist:
-
-            # manipulations, to list oly items in path
-
-            # split line by os separator
-            sname = filter(None, line.strip().split(os.path.sep))
-            # split path by os separator
-            spath = filter(None, path.strip().split(os.path.sep))
-
-            # if current line represents object not in from path - continue
-            if not sname[:len(spath)] == spath:
-                continue
-
-            if len(sname) <= len(spath):
-                continue
-
-            # cat path form line
-            shrinked = sname[len(spath):]
-            # get only first element, cause it's exactly in the path
-            name = shrinked[0]
-
-            if name not in res:
-                ftype = get_path_type(tfile, os.path.join(path, name),
-                                      tfile_obj=tf)
-                tarobj = tf.getmember(os.path.join(path, name))
-
-                # modification time
-                mtime = time.strftime("%Y-%m-%d %H:%M",
-                                      time.gmtime(tarobj.mtime))
-                # size
-                fsize = tarobj.size
-
-                res[name] = {"type": ftype,
-                             "mtime": mtime,
-                             "size": hf.format_size(fsize),
-                             "linkpath": tarobj.linkpath}
+    # generate parent path for related link
+    srequri = request_uri.split("?")
+    if len(srequri) > 1 and srequri[1]:
+        parent_dir = "?".join([srequri[0], os.path.split(srequri[1])[0]])
+    else:
+        parent_dir = os.path.split(srequri[0])[0]
+    if parent_dir.endswith("?"):
+        parent_dir = parent_dir[:-1]
 
     folders = []
     files = []
 
-    delim = "/" if path else "?"
+    delim = "/" if in_tar_path else "?"
 
     html_lines = [HTML_PRE.format(path=request_uri, parent=parent_dir)]
 
@@ -129,71 +209,66 @@ def get_tar_list(environ, tfile, start_response, path=""):
 
     response_headers = [('Content-type', 'text/html')]
     start_response(status, response_headers)
+    tfo.close()
     return html_lines
 
 
-def get_path_type(tfile, path=None, tfile_obj=None):
+def get_path_type(environ, redis_cli, tfo):
     """Dtermine path type in tarfile, query references to
 
-    :param tfile: path to tarfile on file system
-    :param path: path in tarfile
-    :param tfile_obj: opened tarfile object
+    :param environ: request environ object
+    :param redis_cli: instantiated redis client
+    :param tfo: opened tarfile object
     """
 
-    # empty path always points to root of tar, which is of type 'directory'
-    if not path:
+    in_tar_path = environ["QUERY_STRING"]
+
+    if not in_tar_path:
+        # assume it's a root of tar
         return "d"
 
-    tf = tfile_obj or tarfile.open(tfile)
-
-    tarobj = tf.getmember(path)
-    if tarobj.isdir():
-        return "d"
-    elif tarobj.isreg():
-        return "f"
-    elif tarobj.issym():
-        return "l"
-
-    if tfile_obj is None:
-        tf.close()
+    return get_cached(environ, redis_cli, in_tar_path, tfo)["type"]
 
 
-def get_file(tfile, fullpath, start_response):
+def get_file(in_tar_path, start_response, tfo):
     """Print file if text else download
 
-    :param tfile: path to tarfile on file system
-    :param fullpath: full file path in tarfile
+    :param in_tar_path: internal tar path to file
+    :param start_response: callback, provided by 'mod_wsgi'
+    :param tfo: open tarfile object
     """
     status = "200 OK"
-    with tarfile.open(tfile) as tf:
-        filobj = tf.extractfile(fullpath)
-        testline = filobj.read(size=40)
-        try:
-            testline.decode("utf-8")
-            filobj.seek(0)
-            response_headers = [('Content-type', 'text/plain'),
-                                ('Content-Disposition', 'filename={}'.format(
-                                    os.path.split(fullpath)[1]))]
-        except UnicodeDecodeError:
-            response_headers = [('Content-type',
-                                 'application/octet-stream'),
-                                ('Content-Disposition',
-                                 'attachment; filename={}'.format(
-                                     os.path.split(fullpath)[1]))]
 
-        start_response(status, response_headers)
-        while True:
-            buf = filobj.read(256)
-            if buf:
-                yield buf
-            else:
-                raise exceptions.StopIteration()
+    filobj = tfo.extractfile(in_tar_path)
+    testline = filobj.read(size=40)
+    try:
+        testline.decode("utf-8")
+        filobj.seek(0)
+        response_headers = [('Content-type', 'text/plain'),
+                            ('Content-Disposition', 'filename={}'.format(
+                                os.path.split(in_tar_path)[1]))]
+    except UnicodeDecodeError:
+        response_headers = [('Content-type',
+                             'application/octet-stream'),
+                            ('Content-Disposition',
+                             'attachment; filename={}'.format(
+                                 os.path.split(in_tar_path)[1]))]
+
+    start_response(status, response_headers)
+    while True:
+        buf = filobj.read(256)
+        if buf:
+            yield buf
+        else:
+            tfo.close()
+            raise exceptions.StopIteration()
 
 
 def application(environ, start_response):
     """WSGI entry point
 
-    environ is provided by http server (Apache2)
+    :param environ: provided by 'mod_wsgi'
+    :param start_response: callback, provided by 'mod_wsgi'
     """
 
     # part of query after '?'
@@ -202,7 +277,17 @@ def application(environ, start_response):
     # absolut path of tarfile on file system (depends on DOCUMENT_ROOT)
     tar_path = environ["PATH_TRANSLATED"]
 
-    ftype = get_path_type(tar_path, query_string)
+    req_path = environ["PATH_INFO"]
+    redis_cli = redis.StrictRedis(**REDIS_CONN_ARGS)
+    if not redis_cli.keys("{}*".format(req_path)):
+        start_build_cache(environ)
+
+    tfo = tarfile.open(tar_path, "r")
+    try:
+        ftype = get_path_type(environ, redis_cli, tfo)
+    except exceptions.KeyError as e:
+        start_response("404 Not found", [])
+        return str(e)
 
     # we're  not  processing links, so, just list the directory link in
     if ftype == "l":
@@ -210,7 +295,6 @@ def application(environ, start_response):
         ftype = "d"
 
     if ftype == "d":
-        return get_tar_list(environ, tar_path, start_response,
-                            path=query_string)
+        return get_tar_list(environ, redis_cli, start_response, tfo)
     else:
-        return get_file(tar_path, query_string, start_response)
+        return get_file(query_string, start_response, tfo)

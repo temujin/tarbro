@@ -1,1 +1,2 @@
 humanfriendly==2.4
+redis==2.10.5

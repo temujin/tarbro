@@ -34,6 +34,7 @@ Requirements
 
 * mod_wsgi
 
+* redis server
 
 Installation
 ------------
@@ -73,3 +74,5 @@ and update next lines with actual data:
     *   ``WSGIPythonHome ${tarbro_path}/.venv``
 
     *   ``<VirtualHost *:80>``
+
+Update SETTINGS.py if you need
