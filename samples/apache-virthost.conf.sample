@@ -40,6 +40,21 @@ WSGIPythonHome ${tarbro_path}/.venv
 
   RewriteRule ^/(.*\.tar\.gz)$ /tarbro/$1 [QSA,L,PT,NS]
 
+  <IfModule mime_module>
+    AddType text/plain .conf .cfg .yml .yaml .json .log
+    # for any gzipped files, try to send them as their original content type
+    # but with transfer encoding set to gzip
+    # (so browsers supporting it may uncompress them and show their content to user)
+    # this allows viewing *.log.gz and alike directly in browser
+    RemoveType .gz
+    AddEncoding x-gzip .gz
+    <FilesMatch ".+\.t(ar\.)?gz(ip)?$">
+      # but if tar.gz is the case, force keeping the Type as gzip, and no encoding
+      RemoveEncoding .gz
+      AddType application/gzip .gz
+    </FilesMatch>
+  </IfModule>
+
   WSGIScriptAlias /tarbro ${tarbro_path}/tarbro/wsgi.py
   LogLevel warn
   ServerSignature Off
