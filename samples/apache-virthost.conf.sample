@@ -38,6 +38,7 @@ WSGIPythonHome ${tarbro_path}/.venv
   #                    therefore ensure the rewrite doesn't trigger by
   #                    disallowing subrequests.
 
+  RewriteRule ^/-tarbro-raw-/(.*\.t(ar\.)?gz(ip)?)$ /$1 [END]
   RewriteRule ^/(.*\.tar\.gz)$ /tarbro/$1 [QSA,L,PT,NS]
 
   WSGIScriptAlias /tarbro ${tarbro_path}/tarbro/wsgi.py
